@@ -1,0 +1,1423 @@
+﻿<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Hospital de la mujer · Panel de inventario</title>
+
+  <!-- ── FUENTES ──────────────────────────────────────────────────────── -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+  <!-- ── DESIGN TOKENS Y ESTILOS GLOBALES ─────────────────────────────── -->
+  <style>
+    :root {
+      --bg:       #f6f4ee;
+      --surface:  #fdfcf8;
+      --surface-2:#efece2;
+      --ink:      #1c1d18;
+      --muted:    #6a6a60;
+      --border:   #ddd9c8;
+      --accent:   #2f5949;
+      --accent-2: #dfe9e3;
+      --amber:    #b45309;
+      --crimson:  #a8302a;
+    }
+    html, body { margin: 0; padding: 0; background: var(--bg); height: 100%; }
+    body { font-family: "Geist", system-ui, sans-serif; color: var(--ink); -webkit-font-smoothing: antialiased; height: 100vh; overflow: hidden; }
+    #root { height: 100vh; width: 100vw; }
+    button { font-family: inherit; }
+    *::-webkit-scrollbar { width: 8px; height: 8px; }
+    *::-webkit-scrollbar-thumb { background: rgba(28,29,24,0.18); border-radius: 4px; }
+    *::-webkit-scrollbar-track { background: transparent; }
+    @keyframes tslide { from { transform: translate(-50%, 10px); opacity: 0; } to { transform: translate(-50%, 0); opacity: 1; } }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- ── LIBRERÍAS ────────────────────────────────────────────────────── -->
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/dexie/dist/dexie.umd.js"></script>
+  <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
+
+  <!-- ══════════════════════════════════════════════════════════════════
+       SECCIÓN 1 · BASE DE DATOS (IndexedDB / Dexie)
+       Helpers y función de inicialización. Sin JSX.
+  ══════════════════════════════════════════════════════════════════════ -->
+  <script>
+    window.computeDiasACaducar = function(med) {
+      return Object.assign({}, med, {
+        diasACaducar: Math.round((new Date(med.caducidad) - new Date()) / 86400000)
+      });
+    };
+
+    window.fmtTimestamp = function(iso) {
+      var diff = Date.now() - new Date(iso).getTime();
+      var min = Math.floor(diff / 60000);
+      if (min < 1) return 'ahora';
+      if (min < 60) return 'hace ' + min + ' min';
+      var h = Math.floor(min / 60);
+      if (h < 24) return 'hace ' + h + ' h';
+      return 'hace ' + Math.floor(h / 24) + ' d';
+    };
+
+    window.initDB = async function() {
+      var db = new Dexie('HospitalInventarioDB');
+      db.version(1).stores({
+        medicamentos: 'sku, categoria, caducidad, stock',
+        movimientos: '++id, tipo, sku, timestamp, area',
+        areas: '++id, &nombre',
+        config: 'key'
+      });
+      await db.open();
+      var cfg = await db.config.get('init');
+      if (!cfg) {
+        await db.config.put({ key: 'init', at: new Date().toISOString() });
+      }
+      var meds = await db.medicamentos.toArray();
+      var movs = await db.movimientos.orderBy('id').reverse().toArray();
+      var areasRaw = await db.areas.orderBy('nombre').toArray();
+      return {
+        db: db,
+        meds: meds.map(window.computeDiasACaducar),
+        movs: movs,
+        areas: areasRaw.map(function(a) { return a.nombre; })
+      };
+    };
+
+    window.DB = null;
+  </script>
+  <!-- ══════════════════════════════════════════════════════════════════
+       SECCIÓN 2 · COMPONENTES UI COMPARTIDOS
+       Icon, Badge, Btn, stockStatus, caducStatus, Modal,
+       Field, Input, Select, Toast, Sparkline, StockBar
+  ══════════════════════════════════════════════════════════════════════ -->
+  <script type="text/babel">
+const { useState, useEffect, useMemo, useRef } = React;
+
+// ─── ICONS ──────────────────────────────────────────────────────────
+const Icon = {
+  panel:    (p) => <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" {...p}><rect x="2" y="2" width="5" height="6"/><rect x="9" y="2" width="5" height="9"/><rect x="2" y="10" width="5" height="4"/><rect x="9" y="13" width="5" height="1.5"/></svg>,
+  almacen:  (p) => <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" {...p}><path d="M2 6l6-3.5L14 6v8H2V6z"/><path d="M6 14V9h4v5"/></svg>,
+  flujo:    (p) => <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" {...p}><path d="M3 5h8M9 3l2 2-2 2M13 11H5m2-2l-2 2 2 2"/></svg>,
+  reporte:  (p) => <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" {...p}><path d="M4 2h6l2.5 2.5V14H4V2z"/><path d="M9.5 2v3H13M6 8h4M6 10.5h4M6 13h3"/></svg>,
+  buscar:   (p) => <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" {...p}><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14" strokeLinecap="round"/></svg>,
+  mas:      (p) => <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" {...p}><path d="M8 3v10M3 8h10" strokeLinecap="round"/></svg>,
+  menos:    (p) => <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" {...p}><path d="M3 8h10" strokeLinecap="round"/></svg>,
+  flecha:   (p) => <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" {...p}><path d="M4 8h8M9 5l3 3-3 3" strokeLinecap="round" strokeLinejoin="round"/></svg>,
+  excel:    (p) => <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" {...p}><path d="M4 2h5.5L13 5v9H4V2z"/><path d="M9.5 2v3H13"/><path d="M5.5 8l3 4M8.5 8l-3 4" strokeLinecap="round"/></svg>,
+  gestionar:(p) => <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" {...p}><path d="M2 4h12M2 8h12M2 12h8" strokeLinecap="round"/><path d="M13 11v3M11.5 12.5h3" strokeLinecap="round"/></svg>,
+  basura:   (p) => <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" {...p}><path d="M3 4h10M6 4V2.5h4V4M4.5 4l.5 9.5h6L11.5 4M7 7v4M9 7v4" strokeLinecap="round"/></svg>,
+  cerrar:   (p) => <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" {...p}><path d="M4 4l8 8M12 4l-8 8" strokeLinecap="round"/></svg>,
+  check:    (p) => <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" {...p}><path d="M3 8.5L6.5 12 13 4.5" strokeLinecap="round" strokeLinejoin="round"/></svg>,
+  alerta:   (p) => <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" {...p}><path d="M8 2l6.5 11H1.5L8 2z"/><path d="M8 6.5v3M8 11.2v.1" strokeLinecap="round"/></svg>,
+  areas:    (p) => <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" {...p}><rect x="2" y="2" width="5.5" height="5.5"/><rect x="8.5" y="2" width="5.5" height="5.5"/><rect x="2" y="8.5" width="5.5" height="5.5"/><path d="M11.25 9v4M9.25 11h4" strokeLinecap="round"/></svg>,
+  editar:   (p) => <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" {...p}><path d="M11 2.5l2.5 2.5L5 13.5H2.5V11L11 2.5z"/></svg>,
+};
+window.Icon = Icon;
+
+// ─── BADGE ──────────────────────────────────────────────────────────
+function Badge({ tone = 'neutral', children, size = 'md' }) {
+  const tones = {
+    neutral: { bg: '#eeece2', fg: '#52524a', bd: '#d9d6c5' },
+    jade:    { bg: '#dfe9e3', fg: '#244a3c', bd: '#b9cec3' },
+    amber:   { bg: '#f6ead0', fg: '#7a4a07', bd: '#e6d2a2' },
+    crimson: { bg: '#f3dad7', fg: '#7a2521', bd: '#dfb1ac' },
+    ink:     { bg: '#1c1d18', fg: '#f3efe5', bd: '#1c1d18' },
+    soft:    { bg: 'transparent', fg: '#6b6b62', bd: '#d9d6c5' }
+  }[tone] || { bg: '#eeece2', fg: '#52524a', bd: '#d9d6c5' };
+  const sz = size === 'sm'
+    ? { fontSize: 10.5, padding: '1px 6px', letterSpacing: 0.4 }
+    : { fontSize: 11, padding: '2px 8px', letterSpacing: 0.4 };
+  return <span style={{ display:'inline-flex', alignItems:'center', gap:4, background:tones.bg, color:tones.fg, border:`1px solid ${tones.bd}`, textTransform:'uppercase', fontWeight:600, borderRadius:3, fontFamily:'Geist, system-ui', ...sz }}>{children}</span>;
+}
+window.Badge = Badge;
+
+// ─── BTN ────────────────────────────────────────────────────────────
+function Btn({ variant='ghost', size='md', icon, children, onClick, disabled, style }) {
+  const variants = {
+    primary: { bg:'var(--accent)', fg:'#f1ede2', bd:'var(--accent)', hov:'#23463a' },
+    ink:     { bg:'var(--ink)',    fg:'#f3efe5', bd:'var(--ink)',    hov:'#000' },
+    ghost:   { bg:'transparent',  fg:'var(--ink)', bd:'var(--border)', hov:'var(--surface-2)' },
+    danger:  { bg:'transparent',  fg:'var(--crimson)', bd:'var(--border)', hov:'#f3dad7' },
+  };
+  const v = variants[variant] || variants.ghost;
+  const sz = size === 'sm' ? { padding:'4px 10px', fontSize:12.5, height:26 }
+           : size === 'lg' ? { padding:'10px 18px', fontSize:14.5, height:40 }
+           : { padding:'7px 14px', fontSize:13, height:32 };
+  const [hov, setHov] = useState(false);
+  return (
+    <button onClick={onClick} disabled={disabled}
+      onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
+      style={{ display:'inline-flex', alignItems:'center', gap:6,
+        background: hov && !disabled ? v.hov : v.bg, color:v.fg,
+        border:`1px solid ${v.bd}`, borderRadius:3,
+        fontFamily:'Geist, system-ui', fontWeight:500, letterSpacing:0.1,
+        cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.5 : 1,
+        transition:'background .12s', ...sz, ...style }}>
+      {icon ? <span style={{ width:14, height:14, display:'inline-flex' }}>{icon}</span> : null}
+      {children}
+    </button>
+  );
+}
+window.Btn = Btn;
+
+// ─── STATUS HELPERS ──────────────────────────────────────────────────
+function stockStatus(m) {
+  if (m.stock <= 0) return { tone:'crimson', label:'Agotado' };
+  if (m.stock < m.minimo * 0.7) return { tone:'crimson', label:'Crítico' };
+  if (m.stock < m.minimo) return { tone:'amber', label:'Escaso' };
+  return { tone:'jade', label:'En stock' };
+}
+function caducStatus(m) {
+  if (m.diasACaducar < 0) return { tone:'crimson', label:'Vencido' };
+  if (m.diasACaducar <= 30) return { tone:'crimson', label:`${m.diasACaducar} d` };
+  if (m.diasACaducar <= 90) return { tone:'amber', label:`${m.diasACaducar} d` };
+  return { tone:'soft', label:`${m.diasACaducar} d` };
+}
+window.stockStatus = stockStatus;
+window.caducStatus = caducStatus;
+
+// ─── MODAL ──────────────────────────────────────────────────────────
+function Modal({ open, onClose, title, subtitle, children, footer, width=540 }) {
+  if (!open) return null;
+  return (
+    <div onClick={onClose} style={{ position:'absolute', inset:0, background:'rgba(20,20,16,0.32)', backdropFilter:'blur(2px)', zIndex:60, display:'flex', alignItems:'center', justifyContent:'center' }}>
+      <div onClick={e => e.stopPropagation()} style={{ width, background:'var(--surface)', border:'1px solid var(--border)', boxShadow:'0 12px 40px rgba(20,20,16,.18)', borderRadius:4 }}>
+        <div style={{ padding:'20px 24px 14px', borderBottom:'1px solid var(--border)', display:'flex', alignItems:'flex-start', gap:8 }}>
+          <div style={{ flex:1 }}>
+            <div style={{ fontFamily:'"Instrument Serif", serif', fontSize:26, lineHeight:1, color:'var(--ink)' }}>{title}</div>
+            {subtitle && <div style={{ marginTop:6, fontSize:12.5, color:'var(--muted)' }}>{subtitle}</div>}
+          </div>
+          <button onClick={onClose} style={{ border:'none', background:'transparent', cursor:'pointer', color:'var(--muted)', padding:4 }}><Icon.cerrar width="14" height="14"/></button>
+        </div>
+        <div style={{ padding:'18px 24px' }}>{children}</div>
+        {footer && <div style={{ padding:'14px 24px', borderTop:'1px solid var(--border)', display:'flex', gap:8, justifyContent:'flex-end', background:'var(--surface-2)' }}>{footer}</div>}
+      </div>
+    </div>
+  );
+}
+window.Modal = Modal;
+
+// ─── FORM CONTROLS ──────────────────────────────────────────────────
+function Field({ label, hint, error, children, span=1 }) {
+  return (
+    <label style={{ display:'block', gridColumn:`span ${span}` }}>
+      <div style={{ fontSize:11, letterSpacing:0.6, textTransform:'uppercase', color: error ? 'var(--crimson)' : 'var(--muted)', marginBottom:6, fontWeight:600 }}>{label}</div>
+      {children}
+      {error  && <div style={{ fontSize:11.5, color:'var(--crimson)', marginTop:4 }}>{error}</div>}
+      {!error && hint && <div style={{ fontSize:11.5, color:'var(--muted)', marginTop:4 }}>{hint}</div>}
+    </label>
+  );
+}
+function Input({ value, onChange, placeholder, type='text', mono, error, min, max, step }) {
+  return (
+    <input value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder} type={type}
+      min={min} max={max} step={step}
+      style={{ width:'100%', height:34, padding:'0 10px', background:'var(--surface)',
+        border:`1px solid ${error ? 'var(--crimson)' : 'var(--border)'}`,
+        borderRadius:3, fontSize:13.5, color:'var(--ink)',
+        fontFamily: mono ? '"JetBrains Mono", monospace' : 'Geist, system-ui',
+        outline:'none', transition:'border-color .12s, box-shadow .12s', boxSizing:'border-box' }}
+      onFocus={e => e.target.style.boxShadow = error ? '0 0 0 2px rgba(168,48,42,0.15)' : '0 0 0 2px rgba(47,89,73,0.15)'}
+      onBlur={e => e.target.style.boxShadow = 'none'} />
+  );
+}
+function Select({ value, onChange, options }) {
+  return (
+    <select value={value} onChange={e => onChange(e.target.value)}
+      style={{ height:34, padding:'0 10px', background:'var(--surface)', border:'1px solid var(--border)', borderRadius:3, fontSize:13.5, color:'var(--ink)', fontFamily:'Geist, system-ui', outline:'none', appearance:'none', backgroundImage:'linear-gradient(45deg,transparent 50%,#6b6b62 50%),linear-gradient(135deg,#6b6b62 50%,transparent 50%)', backgroundPosition:'right 12px center,right 8px center', backgroundSize:'4px 4px,4px 4px', backgroundRepeat:'no-repeat', width:'100%' }}>
+      {options.map(o => <option key={o.value ?? o} value={o.value ?? o}>{o.label ?? o}</option>)}
+    </select>
+  );
+}
+window.Field = Field; window.Input = Input; window.Select = Select;
+
+// ─── TOAST ──────────────────────────────────────────────────────────
+function Toast({ toast, onClose }) {
+  useEffect(() => { if (!toast) return; const t = setTimeout(onClose, 3500); return () => clearTimeout(t); }, [toast]);
+  if (!toast) return null;
+  return (
+    <div style={{ position:'absolute', bottom:24, left:'50%', transform:'translateX(-50%)', zIndex:80, background:'var(--ink)', color:'#f3efe5', padding:'10px 16px', borderRadius:3, fontSize:13, display:'flex', alignItems:'center', gap:10, boxShadow:'0 8px 24px rgba(20,20,16,.25)', fontFamily:'Geist, system-ui', animation:'tslide .25s ease-out' }}>
+      <span style={{ width:16, height:16, borderRadius:8, background:'var(--accent)', color:'#f1ede2', display:'inline-flex', alignItems:'center', justifyContent:'center' }}><Icon.check width="11" height="11"/></span>
+      {toast}
+    </div>
+  );
+}
+window.Toast = Toast;
+
+// ─── SPARKLINE ──────────────────────────────────────────────────────
+function Sparkline({ data, width=80, height=22, color='currentColor' }) {
+  const max = Math.max(...data, 1), min = Math.min(...data, 0);
+  const range = max - min || 1;
+  const step = data.length > 1 ? width / (data.length - 1) : 0;
+  const pts = data.map((v, i) => `${i * step},${height - (v - min) / range * (height - 2) - 1}`).join(' ');
+  return <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`}><polyline fill="none" stroke={color} strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" points={pts}/></svg>;
+}
+window.Sparkline = Sparkline;
+
+// ─── STOCK BAR ──────────────────────────────────────────────────────
+function StockBar({ stock, minimo, width=100 }) {
+  const target = minimo * 2.5;
+  const pct = Math.min(stock / target, 1);
+  const minPct = minimo / target;
+  const color = stock < minimo * 0.7 ? 'var(--crimson)' : stock < minimo ? 'var(--amber)' : 'var(--accent)';
+  return (
+    <div style={{ width, height:6, background:'var(--surface-2)', position:'relative', border:'1px solid var(--border)' }}>
+      <div style={{ position:'absolute', left:0, top:0, bottom:0, width:`${pct * 100}%`, background:color, transition:'width .3s' }}/>
+      <div style={{ position:'absolute', left:`${minPct * 100}%`, top:-2, bottom:-2, width:1, background:'var(--ink)', opacity:0.5 }}/>
+    </div>
+  );
+}
+window.StockBar = StockBar;
+  </script>
+  <!-- ══════════════════════════════════════════════════════════════════
+       SECCIÓN 3 · DASHBOARD PRINCIPAL
+       PanelScreen + Stat, SectionHead, AlertGroup, CategoryStrip
+  ══════════════════════════════════════════════════════════════════════ -->
+  <script type="text/babel">
+const { useState: uS3, useMemo: uM3 } = React;
+
+function PanelScreen({ meds, movs, onNav, density, onAction }) {
+  const escasos    = meds.filter(m => m.stock < m.minimo).sort((a,b) => a.stock/a.minimo - b.stock/b.minimo);
+  const porCaducar = meds.filter(m => m.diasACaducar <= 30).sort((a,b) => a.diasACaducar - b.diasACaducar);
+  const vencidos   = meds.filter(m => m.diasACaducar < 0);
+  const ahora      = new Date();
+  const movHoy     = movs.filter(m => (Date.now() - new Date(m.timestamp)) < 86400000);
+  const entradas   = movHoy.filter(m => m.tipo === 'entrada').length;
+  const salidas    = movHoy.filter(m => m.tipo === 'salida').length;
+  const total      = meds.length;
+  const fechaStr   = ahora.toLocaleDateString('es-MX', { weekday:'long', year:'numeric', month:'long', day:'numeric' });
+  const horaStr    = ahora.toLocaleTimeString('es-MX', { hour:'2-digit', minute:'2-digit' });
+
+  if (meds.length === 0 && movs.length === 0) {
+    return (
+      <div style={{ padding:'28px 36px 40px', display:'flex', flexDirection:'column', gap:28 }}>
+        <header>
+          <div style={{ fontSize:11, letterSpacing:1.5, color:'var(--muted)', textTransform:'uppercase' }}>PANEL GENERAL</div>
+          <h1 style={{ fontWeight:400, fontSize:40, margin:'4px 0 0', lineHeight:1.05, letterSpacing:-0.6, color:'var(--ink)', fontFamily:'"Instrument Serif", serif' }}>
+            Sistema de inventario — Hospital de la Mujer<span style={{ color:'var(--accent)' }}>.</span>
+          </h1>
+          <div style={{ fontSize:13, color:'var(--muted)', marginTop:6 }}>{fechaStr} · <span style={{ fontFamily:'"JetBrains Mono", monospace', fontSize:11.5 }}>{horaStr}</span></div>
+        </header>
+        <div style={{ border:'1px solid var(--border)', background:'var(--surface)', padding:'48px 36px', textAlign:'center' }}>
+          <div style={{ fontFamily:'"Instrument Serif", serif', fontSize:28, color:'var(--muted)', marginBottom:12 }}>Sin datos registrados</div>
+          <div style={{ fontSize:13.5, color:'var(--muted)', marginBottom:24 }}>Comienza agregando medicamentos al almacén.</div>
+          <Btn variant="ink" icon={<Icon.gestionar/>} onClick={() => onAction('gestionMeds')}>Agregar medicamentos</Btn>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ padding:'28px 36px 40px', display:'flex', flexDirection:'column', gap:28 }}>
+      <header style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-end' }}>
+        <div>
+          <div style={{ fontSize:11, letterSpacing:1.5, color:'var(--muted)', textTransform:'uppercase' }}>PANEL GENERAL</div>
+          <h1 style={{ fontWeight:400, fontSize:40, margin:'4px 0 0', lineHeight:1.05, letterSpacing:-0.6, color:'var(--ink)', fontFamily:'"Instrument Serif", serif' }}>
+            Sistema de inventario — Hospital de la Mujer<span style={{ color:'var(--accent)' }}>.</span>
+          </h1>
+          <div style={{ fontSize:13, color:'var(--muted)', marginTop:6 }}>{fechaStr} · <span style={{ fontFamily:'"JetBrains Mono", monospace', fontSize:11.5 }}>{horaStr}</span></div>
+        </div>
+        <div style={{ display:'flex', gap:8 }}>
+          <Btn variant="ghost" size="sm" icon={<Icon.areas/>} onClick={() => onAction('gestionAreas')}>Áreas</Btn>
+          <Btn variant="ghost" size="sm" icon={<Icon.reporte/>} onClick={() => onNav('reportes')}>Reportes</Btn>
+          <Btn variant="ink" size="sm" icon={<Icon.mas/>} onClick={() => onAction('entrada')}>Registrar entrada</Btn>
+        </div>
+      </header>
+
+      <section style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:0, border:'1px solid var(--border)', background:'var(--border)' }}>
+        <Stat label="Medicamentos activos" value={total} unit="claves" hint={`${meds.reduce((s,m) => s+m.stock,0).toLocaleString('es-MX')} unidades en almacén`}/>
+        <Stat label="Por debajo de mínimo" value={escasos.length} unit={escasos.length===1?'clave':'claves'} hint={`${vencidos.length} vencidos · ${porCaducar.length-vencidos.length} cercanos`} alarm={escasos.length>0}/>
+        <Stat label="Movimientos · 24 h" value={entradas+salidas} unit="operaciones" hint={`${entradas} entradas · ${salidas} salidas`}/>
+      </section>
+
+      <section style={{ display:'grid', gridTemplateColumns:'1.4fr 1fr', gap:28 }}>
+        <div>
+          <SectionHead title="Alertas activas" right={
+            <div style={{ display:'flex', gap:6, alignItems:'center', fontSize:12, color:'var(--muted)' }}>
+              <span style={{ display:'inline-flex', alignItems:'center', gap:4 }}>
+                <span style={{ width:7, height:7, background:'var(--crimson)', borderRadius:4 }}/> {escasos.filter(m=>m.stock<m.minimo*0.7).length+vencidos.length} críticas
+              </span>
+              <span style={{ width:1, height:10, background:'var(--border)' }}/>
+              <span style={{ display:'inline-flex', alignItems:'center', gap:4 }}>
+                <span style={{ width:7, height:7, background:'var(--amber)', borderRadius:4 }}/> {escasos.filter(m=>m.stock>=m.minimo*0.7).length+porCaducar.filter(m=>m.diasACaducar>0).length} avisos
+              </span>
+            </div>
+          }/>
+          <div style={{ border:'1px solid var(--border)', background:'var(--surface)' }}>
+            {escasos.length===0 && porCaducar.length===0
+              ? <div style={{ padding:32, textAlign:'center', color:'var(--muted)', fontSize:13 }}>Sin alertas activas.</div>
+              : <>
+                  <AlertGroup title="Cercanos a caducar o vencidos" items={porCaducar.slice(0,4)} kind="caducidad" onClick={m => onAction('detalle',m)}/>
+                  <AlertGroup title="Stock por debajo del mínimo"   items={escasos.slice(0,5)}   kind="stock"     onClick={m => onAction('detalle',m)}/>
+                </>
+            }
+          </div>
+        </div>
+        <div>
+          <SectionHead title="Movimientos recientes" right={
+            <button onClick={() => onNav('movimientos')} style={{ border:'none', background:'transparent', color:'var(--accent)', fontSize:12, fontWeight:600, cursor:'pointer', letterSpacing:0.3, display:'inline-flex', alignItems:'center', gap:4, fontFamily:'Geist, system-ui' }}>
+              Ver todos <Icon.flecha width="12" height="12"/>
+            </button>
+          }/>
+          <div style={{ border:'1px solid var(--border)', background:'var(--surface)' }}>
+            {movs.length === 0
+              ? <div style={{ padding:32, textAlign:'center', color:'var(--muted)', fontSize:13 }}>Sin movimientos.</div>
+              : movs.slice(0,7).map((m,i) => {
+                  const med = meds.find(x => x.sku === m.sku);
+                  const colorTipo = m.tipo==='entrada' ? 'var(--accent)' : m.tipo==='salida' ? 'var(--ink)' : 'var(--amber)';
+                  const signo = m.tipo==='entrada' ? '+' : m.tipo==='ajuste' ? (m.cantidad>=0?'+':'') : '−';
+                  return (
+                    <div key={m.id||i} style={{ padding: density==='compact'?'8px 14px':'12px 14px', borderTop: i?'1px solid var(--border)':'none', display:'flex', alignItems:'center', gap:10 }}>
+                      <span style={{ width:3, alignSelf:'stretch', background:colorTipo, marginLeft:-8, marginRight:4 }}/>
+                      <div style={{ flex:1, minWidth:0 }}>
+                        <div style={{ fontSize:13, color:'var(--ink)', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+                          {med?.nombre || m.sku} <span style={{ color:'var(--muted)' }}>· {med?.presentacion?.split('·')[0]}</span>
+                        </div>
+                        <div style={{ fontSize:11.5, color:'var(--muted)', marginTop:2, display:'flex', gap:6 }}>
+                          <span style={{ fontFamily:'"JetBrains Mono", monospace', fontSize:10.5 }}>{m.sku}</span>
+                          <span>·</span><span>{m.area}</span>
+                          <span>·</span><span>{fmtTimestamp(m.timestamp)}</span>
+                        </div>
+                      </div>
+                      <div style={{ textAlign:'right', fontFamily:'"JetBrains Mono", monospace', fontSize:13, color:colorTipo, fontWeight:500, fontVariantNumeric:'tabular-nums' }}>
+                        {signo}{Math.abs(m.cantidad)}
+                      </div>
+                    </div>
+                  );
+                })
+            }
+          </div>
+        </div>
+      </section>
+
+      {meds.length > 0 &&
+        <section>
+          <SectionHead title="Distribución por categoría"/>
+          <CategoryStrip meds={meds}/>
+        </section>
+      }
+    </div>
+  );
+}
+
+function Stat({ label, value, unit, hint, alarm }) {
+  return (
+    <div style={{ background:'var(--surface)', padding:'18px 22px 16px', position:'relative' }}>
+      <div style={{ fontSize:11, letterSpacing:0.8, color:'var(--muted)', textTransform:'uppercase', fontWeight:600 }}>{label}</div>
+      <div style={{ display:'flex', alignItems:'baseline', gap:8, marginTop:8 }}>
+        <span style={{ fontFamily:'"Instrument Serif", serif', fontSize:42, lineHeight:1, color: alarm?'var(--crimson)':'var(--ink)', fontWeight:400, letterSpacing:-0.5 }}>{value}</span>
+        <span style={{ fontSize:11.5, color:'var(--muted)', textTransform:'lowercase' }}>{unit}</span>
+      </div>
+      <div style={{ fontSize:12, color:'var(--muted)', marginTop:6 }}>{hint}</div>
+    </div>
+  );
+}
+
+function SectionHead({ title, right }) {
+  return (
+    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:10 }}>
+      <h3 style={{ fontFamily:'"Instrument Serif", serif', fontSize:22, fontWeight:400, margin:0, color:'var(--ink)' }}>{title}</h3>
+      {right}
+    </div>
+  );
+}
+
+function AlertGroup({ title, items, kind, onClick }) {
+  if (!items.length) return null;
+  return (
+    <div>
+      <div style={{ padding:'8px 14px', background:'var(--surface-2)', borderBottom:'1px solid var(--border)', fontSize:11, letterSpacing:0.8, textTransform:'uppercase', color:'var(--muted)', fontWeight:600, display:'flex', justifyContent:'space-between' }}>
+        <span>{title}</span><span style={{ fontFamily:'"JetBrains Mono", monospace', fontSize:10.5 }}>{items.length}</span>
+      </div>
+      {items.map((m,i) => {
+        const st = kind==='stock' ? stockStatus(m) : caducStatus(m);
+        return (
+          <div key={m.sku+i} onClick={() => onClick(m)}
+            style={{ padding:'11px 14px', borderTop: i?'1px solid var(--border)':'none', display:'grid', gridTemplateColumns:'1fr auto auto', gap:12, alignItems:'center', cursor:'pointer' }}
+            onMouseEnter={e => e.currentTarget.style.background='var(--surface-2)'}
+            onMouseLeave={e => e.currentTarget.style.background='transparent'}>
+            <div style={{ minWidth:0 }}>
+              <div style={{ fontSize:13.5, color:'var(--ink)', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+                {m.nombre} <span style={{ color:'var(--muted)' }}>· {m.presentacion?.split('·')[0]?.trim()}</span>
+              </div>
+              <div style={{ fontSize:11, color:'var(--muted)', marginTop:2, fontFamily:'"JetBrains Mono", monospace' }}>{m.sku} · lote {m.lote} · {m.ubicacion}</div>
+            </div>
+            {kind==='stock'
+              ? <div style={{ display:'flex', flexDirection:'column', alignItems:'flex-end', gap:3 }}>
+                  <span style={{ fontFamily:'"JetBrains Mono", monospace', fontSize:12.5, color:'var(--ink)', fontVariantNumeric:'tabular-nums' }}>{m.stock}<span style={{ color:'var(--muted)' }}>/{m.minimo}</span></span>
+                  <StockBar stock={m.stock} minimo={m.minimo} width={90}/>
+                </div>
+              : <div style={{ display:'flex', flexDirection:'column', alignItems:'flex-end', gap:3 }}>
+                  <span style={{ fontFamily:'"JetBrains Mono", monospace', fontSize:12, color:'var(--muted)' }}>{m.caducidad}</span>
+                </div>
+            }
+            <Badge tone={st.tone} size="sm">{st.label}</Badge>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function CategoryStrip({ meds }) {
+  const byCat = {};
+  meds.forEach(m => { byCat[m.categoria] = (byCat[m.categoria]||0) + m.stock; });
+  const cats = Object.entries(byCat).sort((a,b) => b[1]-a[1]).slice(0,7);
+  const max = Math.max(...cats.map(c => c[1]));
+  return (
+    <div style={{ border:'1px solid var(--border)', background:'var(--surface)', padding:'20px 22px', display:'flex', gap:0, alignItems:'flex-end', height:140 }}>
+      {cats.map(([cat,val],i) => {
+        const spark = Array.from({length:7},(_,j) => Math.round(val*(0.7+0.3*Math.sin((i+j)*1.3))));
+        return (
+          <div key={cat} style={{ flex:1, display:'flex', flexDirection:'column', justifyContent:'flex-end', alignItems:'stretch', padding:'0 6px', borderLeft: i?'1px solid var(--border)':'none', height:'100%' }}>
+            <div style={{ display:'flex', alignItems:'flex-end', gap:6, marginBottom:8 }}>
+              <span style={{ fontFamily:'"Instrument Serif", serif', fontSize:24, lineHeight:1, color:'var(--ink)' }}>{val.toLocaleString('es-MX')}</span>
+              <span style={{ fontSize:10, color:'var(--muted)', marginBottom:3 }}>u</span>
+            </div>
+            <Sparkline data={spark} width={140} height={20} color="var(--accent)"/>
+            <div style={{ marginTop:8, fontSize:11, color:'var(--muted)', textTransform:'uppercase', letterSpacing:0.4, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{cat}</div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+window.PanelScreen = PanelScreen;
+  </script>
+  <!-- ══════════════════════════════════════════════════════════════════
+       SECCIÓN 4 · ALMACÉN
+       AlmacenScreen — catálogo con búsqueda y filtros
+  ══════════════════════════════════════════════════════════════════════ -->
+  <script type="text/babel">
+const { useState: uS4, useMemo: uM4 } = React;
+
+function AlmacenScreen({ meds, density, onAction }) {
+  const [q, setQ] = uS4('');
+  const [filtroCat, setFiltroCat] = uS4('todas');
+  const [filtroStock, setFiltroStock] = uS4('todos');
+
+  const categorias = uM4(() => ['todas', ...Array.from(new Set(meds.map(m => m.categoria)))], [meds]);
+  const filt = meds.filter(m => {
+    if (q && !`${m.nombre} ${m.presentacion} ${m.sku} ${m.lote}`.toLowerCase().includes(q.toLowerCase())) return false;
+    if (filtroCat !== 'todas' && m.categoria !== filtroCat) return false;
+    if (filtroStock === 'escasos' && m.stock >= m.minimo) return false;
+    if (filtroStock === 'caducar' && m.diasACaducar > 30) return false;
+    return true;
+  });
+  const padRow = density === 'compact' ? '7px 14px' : '12px 14px';
+
+  return (
+    <div style={{ padding:'28px 36px 40px', display:'flex', flexDirection:'column', gap:18 }}>
+      <header style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-end' }}>
+        <div>
+          <div style={{ fontSize:11, letterSpacing:1.5, color:'var(--muted)', textTransform:'uppercase' }}>Catálogo de medicamentos</div>
+          <h1 style={{ fontFamily:'"Instrument Serif", serif', fontWeight:400, fontSize:38, margin:'4px 0 0', lineHeight:1.05, color:'var(--ink)' }}>Almacén central</h1>
+          <div style={{ fontSize:13, color:'var(--muted)', marginTop:4 }}>{filt.length} de {meds.length} claves</div>
+        </div>
+        <div style={{ display:'flex', gap:8 }}>
+          <Btn variant="ghost" size="sm" icon={<Icon.excel/>} onClick={() => onAction('exportarExcel','almacen')}>Exportar Excel</Btn>
+          <Btn variant="ghost" size="sm" icon={<Icon.gestionar/>} onClick={() => onAction('gestionMeds')}>Gestionar</Btn>
+          <Btn variant="ghost" size="sm" icon={<Icon.menos/>} onClick={() => onAction('salida')}>Salida</Btn>
+          <Btn variant="ink" size="sm" icon={<Icon.mas/>} onClick={() => onAction('entrada')}>Entrada</Btn>
+        </div>
+      </header>
+
+      <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+        <div style={{ flex:1, position:'relative' }}>
+          <div style={{ position:'absolute', left:10, top:'50%', transform:'translateY(-50%)', color:'var(--muted)', pointerEvents:'none' }}><Icon.buscar width="13" height="13"/></div>
+          <input value={q} onChange={e => setQ(e.target.value)} placeholder="Buscar por clave, nombre, lote…"
+            style={{ height:36, padding:'0 10px 0 32px', background:'var(--surface)', border:'1px solid var(--border)', borderRadius:3, fontSize:13.5, color:'var(--ink)', fontFamily:'Geist, system-ui', outline:'none', width:'100%', boxSizing:'border-box' }}/>
+        </div>
+        <div style={{ display:'flex', gap:6 }}>
+          {[['todos','Todos'],['escasos','Escasos'],['caducar','Por caducar']].map(([k,l]) =>
+            <button key={k} onClick={() => setFiltroStock(k)} style={{ padding:'7px 12px', fontSize:12, fontWeight:500, borderRadius:3, cursor:'pointer', background: filtroStock===k?'var(--ink)':'var(--surface)', color: filtroStock===k?'#f3efe5':'var(--ink)', border:'1px solid '+(filtroStock===k?'var(--ink)':'var(--border)'), fontFamily:'Geist, system-ui' }}>{l}</button>
+          )}
+        </div>
+        <Select value={filtroCat} onChange={setFiltroCat} options={categorias.map(c => ({ value:c, label: c==='todas'?'Todas las categorías':c }))}/>
+      </div>
+
+      {meds.length === 0
+        ? <div style={{ border:'1px solid var(--border)', background:'var(--surface)', padding:48, textAlign:'center' }}>
+            <div style={{ fontFamily:'"Instrument Serif", serif', fontSize:22, color:'var(--muted)', marginBottom:12 }}>Sin medicamentos registrados</div>
+            <Btn variant="ink" icon={<Icon.gestionar/>} onClick={() => onAction('gestionMeds')}>Agregar primer medicamento</Btn>
+          </div>
+        : <div style={{ border:'1px solid var(--border)', background:'var(--surface)' }}>
+            <div style={{ display:'grid', gridTemplateColumns:'110px 1.6fr 1fr 90px 130px 110px 90px', padding:'10px 14px', background:'var(--surface-2)', borderBottom:'1px solid var(--border)', fontSize:10.5, letterSpacing:0.7, textTransform:'uppercase', color:'var(--muted)', fontWeight:600 }}>
+              <div>Clave</div><div>Medicamento</div><div>Categoría</div><div>Ubic.</div><div style={{ textAlign:'right' }}>Stock / Mín.</div><div>Caducidad</div><div style={{ textAlign:'right' }}>Estado</div>
+            </div>
+            <div style={{ maxHeight: density==='compact'?540:580, overflowY:'auto' }}>
+              {filt.map((m,i) => {
+                const ss = stockStatus(m), cs = caducStatus(m);
+                return (
+                  <div key={m.sku} onClick={() => onAction('detalle',m)}
+                    style={{ display:'grid', gridTemplateColumns:'110px 1.6fr 1fr 90px 130px 110px 90px', padding:padRow, borderBottom:'1px solid var(--border)', alignItems:'center', cursor:'pointer', transition:'background .08s', fontSize:13 }}
+                    onMouseEnter={e => e.currentTarget.style.background='var(--surface-2)'}
+                    onMouseLeave={e => e.currentTarget.style.background='transparent'}>
+                    <div style={{ fontFamily:'"JetBrains Mono", monospace', fontSize:11.5, color:'var(--muted)' }}>{m.sku}</div>
+                    <div>
+                      <div style={{ color:'var(--ink)' }}>{m.nombre}</div>
+                      <div style={{ fontSize:11.5, color:'var(--muted)', marginTop:1 }}>{m.presentacion}</div>
+                    </div>
+                    <div style={{ color:'var(--muted)', fontSize:12.5 }}>{m.categoria}</div>
+                    <div style={{ fontFamily:'"JetBrains Mono", monospace', fontSize:11.5, color:'var(--muted)' }}>{m.ubicacion}</div>
+                    <div style={{ display:'flex', alignItems:'center', gap:8, justifyContent:'flex-end' }}>
+                      <span style={{ fontFamily:'"JetBrains Mono", monospace', fontVariantNumeric:'tabular-nums', fontSize:12.5, color:'var(--ink)' }}>{m.stock}<span style={{ color:'var(--muted)' }}>/{m.minimo}</span></span>
+                      <StockBar stock={m.stock} minimo={m.minimo} width={50}/>
+                    </div>
+                    <div style={{ display:'flex', flexDirection:'column' }}>
+                      <span style={{ fontFamily:'"JetBrains Mono", monospace', fontSize:11.5, color:'var(--ink)' }}>{m.caducidad}</span>
+                      <span style={{ fontSize:10.5, color: cs.tone==='crimson'?'var(--crimson)':cs.tone==='amber'?'var(--amber)':'var(--muted)' }}>{cs.label}</span>
+                    </div>
+                    <div style={{ textAlign:'right' }}><Badge tone={ss.tone} size="sm">{ss.label}</Badge></div>
+                  </div>
+                );
+              })}
+              {filt.length===0 && meds.length>0 && <div style={{ padding:40, textAlign:'center', color:'var(--muted)', fontSize:13 }}>Sin resultados para la búsqueda.</div>}
+            </div>
+          </div>
+      }
+    </div>
+  );
+}
+window.AlmacenScreen = AlmacenScreen;
+  </script>
+
+  <!-- ══════════════════════════════════════════════════════════════════
+       SECCIÓN 5 · MOVIMIENTOS
+       MovimientosScreen — bitácora (objetos, no tuplas)
+  ══════════════════════════════════════════════════════════════════════ -->
+  <script type="text/babel">
+const { useState: uS5 } = React;
+
+function MovimientosScreen({ meds, movs, density, onAction }) {
+  const [tipoF, setTipoF] = uS5('todos');
+  const filt = movs.filter(m => tipoF==='todos' || m.tipo===tipoF);
+  const padRow = density==='compact' ? '8px 14px' : '12px 14px';
+
+  return (
+    <div style={{ padding:'28px 36px 40px', display:'flex', flexDirection:'column', gap:18 }}>
+      <header style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-end' }}>
+        <div>
+          <div style={{ fontSize:11, letterSpacing:1.5, color:'var(--muted)', textTransform:'uppercase' }}>Bitácora · Entradas y salidas</div>
+          <h1 style={{ fontFamily:'"Instrument Serif", serif', fontWeight:400, fontSize:38, margin:'4px 0 0', color:'var(--ink)' }}>Movimientos</h1>
+          <div style={{ fontSize:13, color:'var(--muted)', marginTop:4 }}>{filt.length} operaciones registradas</div>
+        </div>
+        <div style={{ display:'flex', gap:8 }}>
+          <Btn variant="ghost" size="sm" icon={<Icon.excel/>} onClick={() => onAction('exportarExcel','movimientos')}>Exportar Excel</Btn>
+          <Btn variant="ghost" size="sm" icon={<Icon.menos/>} onClick={() => onAction('salida')}>Salida</Btn>
+          <Btn variant="ink" size="sm" icon={<Icon.mas/>} onClick={() => onAction('entrada')}>Entrada</Btn>
+        </div>
+      </header>
+
+      <div style={{ display:'flex', gap:8 }}>
+        {[['todos','Todos'],['entrada','Entradas'],['salida','Salidas'],['ajuste','Ajustes']].map(([k,l]) =>
+          <button key={k} onClick={() => setTipoF(k)} style={{ padding:'7px 14px', fontSize:12.5, fontWeight:500, borderRadius:3, cursor:'pointer', background: tipoF===k?'var(--ink)':'var(--surface)', color: tipoF===k?'#f3efe5':'var(--ink)', border:'1px solid '+(tipoF===k?'var(--ink)':'var(--border)'), fontFamily:'Geist, system-ui' }}>{l}</button>
+        )}
+      </div>
+
+      {movs.length === 0
+        ? <div style={{ border:'1px solid var(--border)', background:'var(--surface)', padding:48, textAlign:'center', color:'var(--muted)', fontSize:13 }}>Sin movimientos registrados aún.</div>
+        : <div style={{ border:'1px solid var(--border)', background:'var(--surface)' }}>
+            <div style={{ display:'grid', gridTemplateColumns:'90px 110px 1.6fr 1.4fr 1fr 90px 110px', padding:'10px 14px', background:'var(--surface-2)', borderBottom:'1px solid var(--border)', fontSize:10.5, letterSpacing:0.7, textTransform:'uppercase', color:'var(--muted)', fontWeight:600 }}>
+              <div>Tipo</div><div>Clave</div><div>Medicamento</div><div>Área / Servicio</div><div>Usuario</div><div style={{ textAlign:'right' }}>Cantidad</div><div>Cuándo</div>
+            </div>
+            <div style={{ maxHeight:560, overflowY:'auto' }}>
+              {filt.length===0
+                ? <div style={{ padding:32, textAlign:'center', color:'var(--muted)', fontSize:13 }}>Sin resultados para este filtro.</div>
+                : filt.map((m,i) => {
+                    const med = meds.find(x => x.sku===m.sku);
+                    const tone = m.tipo==='entrada'?'jade':m.tipo==='salida'?'ink':'amber';
+                    const signo = m.tipo==='entrada'?'+':m.tipo==='ajuste'?(m.cantidad>=0?'+':''):'−';
+                    const color = m.tipo==='entrada'?'var(--accent)':m.tipo==='salida'?'var(--ink)':'var(--amber)';
+                    return (
+                      <div key={m.id||i} style={{ display:'grid', gridTemplateColumns:'90px 110px 1.6fr 1.4fr 1fr 90px 110px', padding:padRow, borderBottom:'1px solid var(--border)', alignItems:'center', fontSize:13 }}>
+                        <div><Badge tone={tone} size="sm">{m.tipo}</Badge></div>
+                        <div style={{ fontFamily:'"JetBrains Mono", monospace', fontSize:11.5, color:'var(--muted)' }}>{m.sku}</div>
+                        <div>
+                          <div style={{ color:'var(--ink)' }}>{med?.nombre || m.sku}</div>
+                          <div style={{ fontSize:11.5, color:'var(--muted)' }}>{med?.presentacion?.split('·')[0]?.trim()}</div>
+                        </div>
+                        <div style={{ color:'var(--ink)', fontSize:12.5 }}>
+                          <div>{m.area}</div>
+                          {m.nota && <div style={{ fontSize:11, color:'var(--muted)' }}>{m.nota}</div>}
+                        </div>
+                        <div style={{ color:'var(--muted)', fontSize:12.5 }}>{m.usuario}</div>
+                        <div style={{ textAlign:'right', fontFamily:'"JetBrains Mono", monospace', color, fontVariantNumeric:'tabular-nums', fontWeight:500 }}>{signo}{Math.abs(m.cantidad)}</div>
+                        <div style={{ color:'var(--muted)', fontSize:11.5 }}>{fmtTimestamp(m.timestamp)}</div>
+                      </div>
+                    );
+                  })
+              }
+            </div>
+          </div>
+      }
+    </div>
+  );
+}
+window.MovimientosScreen = MovimientosScreen;
+  </script>
+  <!-- ══════════════════════════════════════════════════════════════════
+       SECCIÓN 6 · REPORTES
+       ReportesScreen — 5 plantillas de exportación Excel
+  ══════════════════════════════════════════════════════════════════════ -->
+  <script type="text/babel">
+function ReportesScreen({ meds, movs, onAction }) {
+  const hoy = new Date();
+  const hace30 = new Date(hoy); hace30.setDate(hoy.getDate()-30);
+
+  const reportes = [
+    { id:'stock-actual', title:'Stock actual completo',     sub:'Inventario con todas las claves',                        cols:['Clave','Medicamento','Stock','Mín.','Lote','Caducidad','Días','Estado'], rows: meds.length },
+    { id:'escasos',      title:'Escasos y agotados',        sub:'Claves por debajo del mínimo establecido',               cols:['Clave','Medicamento','Stock','Mínimo','Faltante','Estado'],              rows: meds.filter(m=>m.stock<m.minimo).length },
+    { id:'caducidad',    title:'Próximos a caducar',        sub:'Caducidad ≤ 90 días, incluye vencidos',                  cols:['Clave','Medicamento','Lote','Caducidad','Días','Stock'],                 rows: meds.filter(m=>m.diasACaducar<=90).length },
+    { id:'movimientos',  title:'Bitácora de movimientos',   sub:'Entradas, salidas y ajustes registrados',                cols:['Fecha','Hora','Tipo','Clave','Cantidad','Área','Usuario','Nota'],        rows: movs.length },
+    { id:'consumo-mes',  title:'Consumo por área · 30 días',sub:'Desglose por servicio y categoría — último mes',         cols:['Área','Categoría','Claves','Unidades'],                                  rows: movs.filter(m=>m.tipo==='salida'&&new Date(m.timestamp)>=hace30).length },
+  ];
+
+  return (
+    <div style={{ padding:'28px 36px 40px', display:'flex', flexDirection:'column', gap:22 }}>
+      <header>
+        <div style={{ fontSize:11, letterSpacing:1.5, color:'var(--muted)', textTransform:'uppercase' }}>Exportar · Excel</div>
+        <h1 style={{ fontFamily:'"Instrument Serif", serif', fontWeight:400, fontSize:38, margin:'4px 0 0', color:'var(--ink)' }}>Reportes</h1>
+        <div style={{ fontSize:13, color:'var(--muted)', marginTop:4 }}>Genera reportes en formato compatible con Excel. Los datos son del inventario actual.</div>
+      </header>
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:1, background:'var(--border)', border:'1px solid var(--border)' }}>
+        {reportes.map(r =>
+          <div key={r.id} style={{ background:'var(--surface)', padding:'22px 24px', display:'flex', flexDirection:'column', gap:12 }}>
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start' }}>
+              <div>
+                <div style={{ fontFamily:'"Instrument Serif", serif', fontSize:24, color:'var(--ink)', lineHeight:1.1, letterSpacing:-0.3 }}>{r.title}</div>
+                <div style={{ fontSize:12.5, color:'var(--muted)', marginTop:4 }}>{r.sub}</div>
+              </div>
+              <span style={{ width:32, height:32, background:'var(--surface-2)', border:'1px solid var(--border)', display:'inline-flex', alignItems:'center', justifyContent:'center', color:'var(--accent)' }}>
+                <Icon.excel width="14" height="14"/>
+              </span>
+            </div>
+            <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
+              {r.cols.map(c => <span key={c} style={{ fontSize:10.5, color:'var(--muted)', background:'var(--surface-2)', border:'1px solid var(--border)', padding:'2px 7px', fontFamily:'"JetBrains Mono", monospace' }}>{c}</span>)}
+            </div>
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginTop:4 }}>
+              <span style={{ fontSize:11.5, color:'var(--muted)' }}><span style={{ fontFamily:'"JetBrains Mono", monospace' }}>{r.rows}</span> filas</span>
+              <Btn variant="primary" size="sm" icon={<Icon.excel/>} onClick={() => onAction('exportarExcel', r.id)}>Descargar .xlsx</Btn>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+window.ReportesScreen = ReportesScreen;
+  </script>
+
+  <!-- ══════════════════════════════════════════════════════════════════
+       SECCIÓN 7 · GENERACIÓN DE EXCEL REAL (SheetJS)
+       Sin JSX — función pura vanilla JS
+  ══════════════════════════════════════════════════════════════════════ -->
+  <script>
+window.generateReport = function(reporteId, meds, movs) {
+  var XLSX = window.XLSX;
+  if (!XLSX) { alert('SheetJS no cargó. Verifica la conexión a internet.'); return; }
+
+  var wb = XLSX.utils.book_new();
+  var today = new Date().toISOString().slice(0,10);
+  var filename;
+
+  function addSheet(name, rows, colWidths) {
+    var ws = XLSX.utils.json_to_sheet(rows);
+    if (colWidths) ws['!cols'] = colWidths.map(function(w){ return { wch: w }; });
+    XLSX.utils.book_append_sheet(wb, ws, name);
+  }
+
+  function stockLbl(m) {
+    if (m.stock <= 0) return 'Agotado';
+    if (m.stock < m.minimo * 0.7) return 'Crítico';
+    if (m.stock < m.minimo) return 'Escaso';
+    return 'En stock';
+  }
+
+  function caducLbl(m) {
+    var d = computeDiasACaducar(m).diasACaducar;
+    if (d < 0) return 'Vencido';
+    if (d <= 30) return d + ' días (crítico)';
+    if (d <= 90) return d + ' días (aviso)';
+    return d + ' días';
+  }
+
+  if (reporteId === 'stock-actual' || reporteId === 'almacen') {
+    filename = 'stock-actual-' + today + '.xlsx';
+    var rows = meds.map(function(m) {
+      var dac = computeDiasACaducar(m).diasACaducar;
+      return {
+        'Clave': m.sku, 'Medicamento': m.nombre, 'Presentación': m.presentacion,
+        'Categoría': m.categoria, 'Ubicación': m.ubicacion,
+        'Stock': m.stock, 'Mínimo': m.minimo, 'Lote': m.lote,
+        'Caducidad': m.caducidad, 'Días a Caducar': dac, 'Estado': stockLbl(m)
+      };
+    });
+    addSheet('Stock Actual', rows, [12,22,26,18,12,8,8,10,14,14,12]);
+
+  } else if (reporteId === 'escasos') {
+    filename = 'escasos-' + today + '.xlsx';
+    var rows = meds.filter(function(m){ return m.stock < m.minimo; })
+      .sort(function(a,b){ return a.stock/a.minimo - b.stock/b.minimo; })
+      .map(function(m) {
+        return {
+          'Clave': m.sku, 'Medicamento': m.nombre, 'Presentación': m.presentacion,
+          'Stock': m.stock, 'Mínimo': m.minimo, 'Faltante': m.minimo - m.stock,
+          'Estado': stockLbl(m)
+        };
+      });
+    addSheet('Escasos', rows, [12,22,26,8,8,8,12]);
+
+  } else if (reporteId === 'caducidad') {
+    filename = 'caducidad-' + today + '.xlsx';
+    var rows = meds.filter(function(m){ return computeDiasACaducar(m).diasACaducar <= 90; })
+      .sort(function(a,b){ return computeDiasACaducar(a).diasACaducar - computeDiasACaducar(b).diasACaducar; })
+      .map(function(m) {
+        var dac = computeDiasACaducar(m).diasACaducar;
+        return {
+          'Clave': m.sku, 'Medicamento': m.nombre, 'Lote': m.lote,
+          'Caducidad': m.caducidad, 'Días a Caducar': dac,
+          'Stock': m.stock, 'Estado Caducidad': caducLbl(m)
+        };
+      });
+    addSheet('Caducidad', rows, [12,22,10,14,14,8,20]);
+
+  } else if (reporteId === 'movimientos') {
+    filename = 'movimientos-' + today + '.xlsx';
+    var rows = movs.map(function(m) {
+      var d = new Date(m.timestamp);
+      var med = meds.find(function(x){ return x.sku===m.sku; });
+      return {
+        'Fecha': d.toLocaleDateString('es-MX'), 'Hora': d.toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'}),
+        'Tipo': m.tipo, 'Clave': m.sku,
+        'Medicamento': med ? med.nombre : m.sku,
+        'Cantidad': m.tipo==='salida' ? -m.cantidad : m.cantidad,
+        'Área / Servicio': m.area, 'Usuario': m.usuario, 'Nota': m.nota || ''
+      };
+    });
+    addSheet('Movimientos', rows, [14,10,10,12,22,10,22,18,24]);
+
+  } else if (reporteId === 'consumo-mes') {
+    filename = 'consumo-mes-' + today + '.xlsx';
+    var hace30 = new Date(); hace30.setDate(hace30.getDate()-30);
+    var salidas = movs.filter(function(m){ return m.tipo==='salida' && new Date(m.timestamp) >= hace30; });
+    var agg = {};
+    salidas.forEach(function(m) {
+      var med = meds.find(function(x){ return x.sku===m.sku; });
+      var cat = med ? med.categoria : 'Sin categoría';
+      var key = m.area + '|' + cat;
+      if (!agg[key]) agg[key] = { area: m.area, cat: cat, skus: new Set(), unidades: 0 };
+      agg[key].skus.add(m.sku);
+      agg[key].unidades += m.cantidad;
+    });
+    var rows = Object.values(agg).sort(function(a,b){ return b.unidades-a.unidades; }).map(function(r){
+      return { 'Área / Servicio': r.area, 'Categoría': r.cat, 'Claves únicas': r.skus.size, 'Unidades dispensadas': r.unidades };
+    });
+    addSheet('Consumo por Área', rows, [24,20,14,20]);
+  }
+
+  if (filename) {
+    try { XLSX.writeFile(wb, filename); }
+    catch(e) { alert('Error al generar el archivo: ' + e.message); }
+  }
+};
+  </script>
+  <!-- ══════════════════════════════════════════════════════════════════
+       SECCIÓN 8 · APP SHELL
+       InventarioApp — layout, sidebar, topbar, routing, estado global
+  ══════════════════════════════════════════════════════════════════════ -->
+  <script type="text/babel">
+const { useState: aS, useEffect: aE } = React;
+
+function InventarioApp({ initialScreen='panel', density: densityProp }) {
+  const [loading, setLoading]   = aS(true);
+  const [screen,  setScreen]    = aS(initialScreen);
+  const [modal,   setModal]     = aS(null);
+  const [toast,   setToast]     = aS(null);
+  const [internalDensity, setInternalDensity] = aS('comfortable');
+  const density = densityProp ?? internalDensity;
+  const [ahora, setAhora] = aS(new Date());
+  aE(() => { const t = setInterval(() => setAhora(new Date()), 1000); return () => clearInterval(t); }, []);
+
+  const [meds,  setMeds]  = aS([]);
+  const [movs,  setMovs]  = aS([]);
+  const [areas, setAreas] = aS([]);
+
+  // ── DB INIT ─────────────────────────────────────────────────────────
+  aE(() => {
+    window.initDB().then(function(result) {
+      window.DB = result.db;
+      setMeds(result.meds);
+      setMovs(result.movs);
+      setAreas(result.areas);
+      setLoading(false);
+    }).catch(function(e) {
+      console.error('DB init error', e);
+      setLoading(false);
+    });
+  }, []);
+
+  const onAction = (kind, payload) => {
+    if (kind === 'exportarExcel') {
+      window.generateReport(payload, meds, movs);
+      return;
+    }
+    setModal({ kind, payload });
+  };
+
+  // ── ENTRADA ─────────────────────────────────────────────────────────
+  const onConfirmEntrada = async ({ sku, cantidad, lote, caducidad, nota }) => {
+    const cant = Number(cantidad);
+    const newStock = (meds.find(m => m.sku===sku)?.stock || 0) + cant;
+    const mov = { tipo:'entrada', sku, cantidad:cant, area:'Almacén central', usuario:'Encargado', timestamp:new Date().toISOString(), nota: nota||'' };
+    const newId = await window.DB.movimientos.add(mov);
+    await window.DB.medicamentos.update(sku, { stock: newStock, lote, caducidad });
+    mov.id = newId;
+    setMovs(prev => [mov, ...prev]);
+    setMeds(prev => prev.map(m => m.sku===sku ? computeDiasACaducar({...m, stock:newStock, lote, caducidad}) : m));
+    setModal(null);
+    setToast(`Entrada registrada: ${cant} u. de ${meds.find(m=>m.sku===sku)?.nombre || sku}`);
+  };
+
+  // ── SALIDA ──────────────────────────────────────────────────────────
+  const onConfirmSalida = async ({ sku, cantidad, destino, usuario, nota }) => {
+    const cant = Number(cantidad);
+    const newStock = Math.max(0, (meds.find(m => m.sku===sku)?.stock || 0) - cant);
+    const mov = { tipo:'salida', sku, cantidad:cant, area:destino, usuario, timestamp:new Date().toISOString(), nota: nota||'' };
+    const newId = await window.DB.movimientos.add(mov);
+    await window.DB.medicamentos.update(sku, { stock: newStock });
+    mov.id = newId;
+    setMovs(prev => [mov, ...prev]);
+    setMeds(prev => prev.map(m => m.sku===sku ? computeDiasACaducar({...m, stock:newStock}) : m));
+    setModal(null);
+    setToast(`Salida registrada: ${cant} u. a ${destino}`);
+  };
+
+  // ── GESTIÓN MEDS ────────────────────────────────────────────────────
+  const onAddMed = async (med) => {
+    await window.DB.medicamentos.put(med);
+    setMeds(prev => [computeDiasACaducar(med), ...prev]);
+    setToast(`Medicamento agregado: ${med.nombre}`);
+  };
+  const onDelMed = async (sku) => {
+    const m = meds.find(x => x.sku===sku);
+    await window.DB.medicamentos.delete(sku);
+    setMeds(prev => prev.filter(x => x.sku!==sku));
+    setToast(`Medicamento eliminado: ${m?.nombre || sku}`);
+  };
+
+  // ── GESTIÓN ÁREAS ───────────────────────────────────────────────────
+  const onAddArea = async (nombre) => {
+    if (!nombre.trim() || areas.includes(nombre.trim())) return;
+    await window.DB.areas.add({ nombre: nombre.trim() });
+    setAreas(prev => [...prev, nombre.trim()].sort());
+    setToast(`Área agregada: ${nombre.trim()}`);
+  };
+  const onDelArea = async (nombre) => {
+    const rec = await window.DB.areas.where('nombre').equals(nombre).first();
+    if (rec) await window.DB.areas.delete(rec.id);
+    setAreas(prev => prev.filter(a => a!==nombre));
+    setToast(`Área eliminada: ${nombre}`);
+  };
+
+  const navItems = [
+    { id:'panel',       label:'Panel',       icon:<Icon.panel/> },
+    { id:'almacen',     label:'Almacén',     icon:<Icon.almacen/> },
+    { id:'movimientos', label:'Movimientos', icon:<Icon.flujo/> },
+    { id:'reportes',    label:'Reportes',    icon:<Icon.reporte/> },
+  ];
+
+  const escasos    = meds.filter(m => m.stock < m.minimo).length;
+  const porCaducar = meds.filter(m => m.diasACaducar >= 0 && m.diasACaducar <= 30).length;
+
+  // ── LOADING ─────────────────────────────────────────────────────────
+  if (loading) {
+    return (
+      <div style={{ display:'flex', height:'100%', width:'100%', alignItems:'center', justifyContent:'center', background:'var(--bg)' }}>
+        <div style={{ textAlign:'center', color:'var(--muted)', fontSize:14 }}>
+          <div style={{ width:24, height:24, border:'2px solid var(--border)', borderTopColor:'var(--accent)', borderRadius:12, animation:'spin 0.8s linear infinite', margin:'0 auto 12px' }}/>
+          Iniciando base de datos…
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display:'flex', height:'100%', width:'100%', background:'var(--bg)', color:'var(--ink)', fontFamily:'Geist, system-ui', position:'relative' }}>
+
+      {/* SIDEBAR */}
+      <aside style={{ width:232, flex:'0 0 232px', borderRight:'1px solid var(--border)', display:'flex', flexDirection:'column', background:'var(--surface)' }}>
+        <div style={{ padding:'20px 20px 24px', borderBottom:'1px solid var(--border)' }}>
+          <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+            <span style={{ width:28, height:28, background:'var(--ink)', display:'inline-flex', alignItems:'center', justifyContent:'center', color:'var(--accent-2)' }}>
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="#dfe9e3" strokeWidth="1.8"><path d="M7 2v10M2 7h10" strokeLinecap="round"/></svg>
+            </span>
+            <div>
+              <div style={{ fontFamily:'"Instrument Serif", serif', fontSize:17, lineHeight:1, color:'var(--ink)' }}>Hospital de la Mujer</div>
+              <div style={{ fontSize:10, letterSpacing:0.8, color:'var(--muted)', textTransform:'uppercase' }}>v 2.0.0</div>
+            </div>
+          </div>
+        </div>
+
+        <nav style={{ padding:'14px 12px', display:'flex', flexDirection:'column', gap:2, flex:1 }}>
+          {navItems.map(it =>
+            <button key={it.id} onClick={() => setScreen(it.id)} style={{
+              display:'flex', alignItems:'center', gap:10, padding:'8px 10px',
+              background: screen===it.id ? 'var(--surface-2)' : 'transparent',
+              border:'none', borderRadius:3, cursor:'pointer', textAlign:'left',
+              color: screen===it.id ? 'var(--ink)' : 'var(--muted)',
+              fontSize:13.5, fontWeight: screen===it.id ? 500 : 400,
+              fontFamily:'Geist, system-ui', position:'relative'
+            }}>
+              {screen===it.id && <span style={{ position:'absolute', left:-12, top:6, bottom:6, width:2, background:'var(--accent)' }}/>}
+              <span style={{ width:16, height:16, display:'inline-flex', color: screen===it.id?'var(--accent)':'var(--muted)' }}>{it.icon}</span>
+              <span style={{ flex:1 }}>{it.label}</span>
+              {it.id==='panel' && escasos+porCaducar>0 &&
+                <span style={{ fontSize:10, color:'var(--crimson)', fontWeight:600, fontFamily:'"JetBrains Mono", monospace' }}>{escasos+porCaducar}</span>
+              }
+            </button>
+          )}
+
+          <div style={{ flex:1 }}/>
+
+          <div style={{ padding:'14px 8px', borderTop:'1px solid var(--border)', marginTop:8, display:'flex', flexDirection:'column', gap:6 }}>
+            <Btn variant="ghost" size="sm" icon={<Icon.mas/>}      onClick={() => onAction('entrada')}    style={{ width:'100%', justifyContent:'flex-start' }}>Registrar entrada</Btn>
+            <Btn variant="ghost" size="sm" icon={<Icon.menos/>}    onClick={() => onAction('salida')}     style={{ width:'100%', justifyContent:'flex-start' }}>Registrar salida</Btn>
+            <Btn variant="ghost" size="sm" icon={<Icon.gestionar/>} onClick={() => onAction('gestionMeds')} style={{ width:'100%', justifyContent:'flex-start' }}>Gestionar medicamentos</Btn>
+          </div>
+        </nav>
+      </aside>
+
+      {/* TOPBAR + CONTENT */}
+      <div style={{ flex:1, display:'flex', flexDirection:'column', minWidth:0 }}>
+        <div style={{ height:44, borderBottom:'1px solid var(--border)', display:'flex', alignItems:'center', padding:'0 36px', gap:14, background:'var(--bg)' }}>
+          <div style={{ fontSize:12, color:'var(--muted)', display:'flex', gap:6, alignItems:'center' }}>
+            <span>Hospital de la Mujer</span><span>/</span><span>Inventario</span><span>/</span>
+            <span style={{ color:'var(--ink)', fontWeight:500, textTransform:'capitalize' }}>{screen}</span>
+          </div>
+          <div style={{ flex:1 }}/>
+          {densityProp == null &&
+            <div style={{ display:'flex', gap:0, border:'1px solid var(--border)', borderRadius:3, overflow:'hidden' }}>
+              {[['comfortable','Cómoda'],['compact','Compacta']].map(([k,l]) =>
+                <button key={k} onClick={() => setInternalDensity(k)} style={{ padding:'4px 10px', fontSize:11.5, border:'none', cursor:'pointer', background: density===k?'var(--ink)':'var(--surface)', color: density===k?'#f3efe5':'var(--ink)', fontFamily:'Geist, system-ui' }}>{l}</button>
+              )}
+            </div>
+          }
+          <div style={{ display:'flex', alignItems:'center', gap:10, borderLeft:'1px solid var(--border)', paddingLeft:14 }}>
+            <div style={{ textAlign:'right' }}>
+              <div style={{ fontFamily:'"JetBrains Mono", monospace', fontSize:15, color:'var(--ink)', letterSpacing:0.5, lineHeight:1 }}>
+                {ahora.toLocaleTimeString('es-MX', { hour:'2-digit', minute:'2-digit', second:'2-digit' })}
+              </div>
+              <div style={{ fontSize:10, color:'var(--muted)', marginTop:2, letterSpacing:0.3 }}>
+                {ahora.toLocaleDateString('es-MX', { weekday:'short', day:'numeric', month:'short' })}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <main style={{ flex:1, overflowY:'auto', overflowX:'hidden' }}>
+          {screen==='panel'       && <PanelScreen       meds={meds} movs={movs}  onNav={setScreen} density={density} onAction={onAction}/>}
+          {screen==='almacen'     && <AlmacenScreen     meds={meds}               density={density} onAction={onAction}/>}
+          {screen==='movimientos' && <MovimientosScreen  meds={meds} movs={movs}  density={density} onAction={onAction}/>}
+          {screen==='reportes'    && <ReportesScreen     meds={meds} movs={movs}  onAction={onAction}/>}
+        </main>
+      </div>
+
+      {/* MODALES */}
+      <EntradaModal      open={modal?.kind==='entrada'}      onClose={() => setModal(null)} onConfirm={onConfirmEntrada} meds={meds} preset={modal?.payload}/>
+      <SalidaModal       open={modal?.kind==='salida'}       onClose={() => setModal(null)} onConfirm={onConfirmSalida}  meds={meds} areas={areas} preset={modal?.payload}/>
+      <DetalleModal      open={modal?.kind==='detalle'}      onClose={() => setModal(null)} med={modal?.payload} onAction={k => setModal({ kind:k, payload:modal?.payload })}/>
+      <GestionMedsModal  open={modal?.kind==='gestionMeds'}  onClose={() => setModal(null)} meds={meds} onAdd={onAddMed} onDelete={onDelMed}/>
+      <GestionAreasModal open={modal?.kind==='gestionAreas'} onClose={() => setModal(null)} areas={areas} onAdd={onAddArea} onDelete={onDelArea}/>
+
+      <Toast toast={toast} onClose={() => setToast(null)}/>
+    </div>
+  );
+}
+window.InventarioApp = InventarioApp;
+  </script>
+  <!-- ══════════════════════════════════════════════════════════════════
+       SECCIÓN 9 · PANELES DE OPCIÓN (MODALES)
+       9.1 EntradaModal  9.2 SalidaModal  9.3 DetalleModal
+       9.4 GestionMedsModal  9.5 GestionAreasModal
+  ══════════════════════════════════════════════════════════════════════ -->
+  <script type="text/babel">
+const { useState: mS, useEffect: mE } = React;
+
+// ── 9.1  MODAL ENTRADA ───────────────────────────────────────────────
+function EntradaModal({ open, onClose, onConfirm, meds, preset }) {
+  const [sku,       setSku]       = mS('');
+  const [cantidad,  setCantidad]  = mS('');
+  const [lote,      setLote]      = mS('');
+  const [caducidad, setCaducidad] = mS('');
+  const [nota,      setNota]      = mS('');
+  const [errors,    setErrors]    = mS({});
+
+  mE(() => {
+    if (open) {
+      setSku(preset?.sku || (meds[0]?.sku || ''));
+      setCantidad(''); setLote(''); setCaducidad(''); setNota(''); setErrors({});
+    }
+  }, [open, preset]);
+
+  const med = meds.find(m => m.sku===sku);
+  const today = new Date().toISOString().slice(0,10);
+
+  const validate = () => {
+    const e = {};
+    if (!cantidad || Number(cantidad) <= 0 || !Number.isInteger(Number(cantidad))) e.cantidad = 'Ingresa un número entero mayor a 0';
+    if (!lote.trim()) e.lote = 'El número de lote es obligatorio';
+    if (!caducidad) e.caducidad = 'La fecha de caducidad es obligatoria';
+    else if (caducidad < today) e.caducidad = 'La fecha de caducidad debe ser futura';
+    return e;
+  };
+
+  const handleConfirm = () => {
+    const e = validate();
+    if (Object.keys(e).length) { setErrors(e); return; }
+    onConfirm({ sku, cantidad, lote, caducidad, nota });
+  };
+
+  if (meds.length === 0) return (
+    <Modal open={open} onClose={onClose} title="Registrar entrada" subtitle="Sin medicamentos en el catálogo" width={500}
+      footer={<Btn variant="ghost" onClick={onClose}>Cerrar</Btn>}>
+      <div style={{ textAlign:'center', padding:'24px 0', color:'var(--muted)' }}>
+        Primero agrega medicamentos desde <strong>Gestionar medicamentos</strong>.
+      </div>
+    </Modal>
+  );
+
+  return (
+    <Modal open={open} onClose={onClose} title="Registrar entrada" subtitle="Recepción al almacén central" width={580}
+      footer={<>
+        <Btn variant="ghost" onClick={onClose}>Cancelar</Btn>
+        <Btn variant="primary" onClick={handleConfirm}>Confirmar entrada</Btn>
+      </>}>
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:14 }}>
+        <Field label="Medicamento" span={2}>
+          <Select value={sku} onChange={setSku} options={meds.map(m => ({ value:m.sku, label:`${m.sku} · ${m.nombre}` }))}/>
+        </Field>
+        <Field label="Cantidad" hint={med ? `Stock actual: ${med.stock} u.` : ''} error={errors.cantidad}>
+          <Input value={cantidad} onChange={v => { setCantidad(v); setErrors(e => ({...e, cantidad:null})); }} type="number" min="1" step="1" placeholder="0" mono error={errors.cantidad}/>
+        </Field>
+        <Field label="Lote" error={errors.lote}>
+          <Input value={lote} onChange={v => { setLote(v); setErrors(e => ({...e, lote:null})); }} placeholder="L0000" mono error={errors.lote}/>
+        </Field>
+        <Field label="Fecha de caducidad" error={errors.caducidad} span={2}>
+          <Input value={caducidad} onChange={v => { setCaducidad(v); setErrors(e => ({...e, caducidad:null})); }} type="date" min={today} mono error={errors.caducidad}/>
+        </Field>
+        <Field label="Nota / observaciones" span={2}>
+          <Input value={nota} onChange={setNota} placeholder="Orden de compra, remisión…"/>
+        </Field>
+      </div>
+    </Modal>
+  );
+}
+
+// ── 9.2  MODAL SALIDA ────────────────────────────────────────────────
+function SalidaModal({ open, onClose, onConfirm, meds, areas, preset }) {
+  const lista = areas.length ? areas : ['Sin áreas registradas'];
+  const [sku,      setSku]      = mS('');
+  const [cantidad, setCantidad] = mS('');
+  const [destino,  setDestino]  = mS('');
+  const [usuario,  setUsuario]  = mS('');
+  const [nota,     setNota]     = mS('');
+  const [errors,   setErrors]   = mS({});
+
+  mE(() => {
+    if (open) {
+      setSku(preset?.sku || (meds[0]?.sku || ''));
+      setCantidad(''); setDestino(areas[0]||''); setUsuario(''); setNota(''); setErrors({});
+    }
+  }, [open, preset]);
+
+  const med = meds.find(m => m.sku===sku);
+  const insuficiente = Number(cantidad) > (med?.stock || 0);
+
+  const validate = () => {
+    const e = {};
+    if (!cantidad || Number(cantidad) <= 0 || !Number.isInteger(Number(cantidad))) e.cantidad = 'Ingresa un número entero mayor a 0';
+    else if (insuficiente) e.cantidad = `Stock insuficiente — solo ${med?.stock} u. disponibles`;
+    if (!usuario.trim() || usuario.trim().length < 3) e.usuario = 'Ingresa el nombre del responsable (mín. 3 caracteres)';
+    if (!destino || destino === 'Sin áreas registradas') e.destino = 'Registra al menos un área primero';
+    return e;
+  };
+
+  const handleConfirm = () => {
+    const e = validate();
+    if (Object.keys(e).length) { setErrors(e); return; }
+    onConfirm({ sku, cantidad, destino, usuario, nota });
+  };
+
+  if (meds.length === 0) return (
+    <Modal open={open} onClose={onClose} title="Registrar salida" subtitle="Sin medicamentos en el catálogo" width={500}
+      footer={<Btn variant="ghost" onClick={onClose}>Cerrar</Btn>}>
+      <div style={{ textAlign:'center', padding:'24px 0', color:'var(--muted)' }}>Primero agrega medicamentos al catálogo.</div>
+    </Modal>
+  );
+
+  return (
+    <Modal open={open} onClose={onClose} title="Registrar salida" subtitle="Dispensación o transferencia" width={580}
+      footer={<>
+        <Btn variant="ghost" onClick={onClose}>Cancelar</Btn>
+        <Btn variant="ink" onClick={handleConfirm}>Confirmar salida</Btn>
+      </>}>
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:14 }}>
+        <Field label="Medicamento" span={2}>
+          <Select value={sku} onChange={setSku} options={meds.map(m => ({ value:m.sku, label:`${m.sku} · ${m.nombre} (${m.stock} u.)` }))}/>
+        </Field>
+        <Field label="Cantidad" error={errors.cantidad}>
+          <Input value={cantidad} onChange={v => { setCantidad(v); setErrors(e => ({...e, cantidad:null})); }} type="number" min="1" step="1" placeholder="0" mono error={errors.cantidad}/>
+        </Field>
+        <Field label="Área o servicio destino" error={errors.destino}>
+          <Select value={destino} onChange={v => { setDestino(v); setErrors(e => ({...e, destino:null})); }} options={lista.length ? lista : ['Agregar áreas primero']}/>
+        </Field>
+        <Field label="Responsable / usuario" error={errors.usuario} span={2}>
+          <Input value={usuario} onChange={v => { setUsuario(v); setErrors(e => ({...e, usuario:null})); }} placeholder="Nombre completo" error={errors.usuario}/>
+        </Field>
+        <Field label="Folio de receta / nota" span={2}>
+          <Input value={nota} onChange={setNota} placeholder="R-00000, cama, bomba…"/>
+        </Field>
+      </div>
+    </Modal>
+  );
+}
+
+// ── 9.3  MODAL DETALLE ───────────────────────────────────────────────
+function DetalleModal({ open, onClose, med, onAction }) {
+  if (!open || !med) return null;
+  const ss = stockStatus(med), cs = caducStatus(med);
+  return (
+    <Modal open={open} onClose={onClose} title={med.nombre} subtitle={`${med.sku} · ${med.presentacion}`} width={600}
+      footer={<>
+        <Btn variant="ghost" onClick={() => onAction('salida')} icon={<Icon.menos/>}>Salida</Btn>
+        <Btn variant="ink"   onClick={() => onAction('entrada')} icon={<Icon.mas/>}>Entrada</Btn>
+      </>}>
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:0, border:'1px solid var(--border)', background:'var(--border)' }}>
+        <KV label="Stock"     value={med.stock}    mono badge={<Badge tone={ss.tone} size="sm">{ss.label}</Badge>}/>
+        <KV label="Mínimo"    value={med.minimo}   mono/>
+        <KV label="Caducidad" value={med.caducidad} mono sub={<Badge tone={cs.tone} size="sm">{cs.label}</Badge>}/>
+      </div>
+      <div style={{ marginTop:18, display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:14, fontSize:13 }}>
+        <Row k="Categoría"   v={med.categoria}/>
+        <Row k="Ubicación"   v={med.ubicacion} mono/>
+        <Row k="Lote"        v={med.lote}      mono/>
+        <Row k="Cobertura est." v={`${med.minimo > 0 ? Math.round(med.stock / (med.minimo/30)) : '—'} días`}/>
+      </div>
+    </Modal>
+  );
+}
+function KV({ label, value, sub, mono, badge }) {
+  return (
+    <div style={{ background:'var(--surface)', padding:'14px 16px' }}>
+      <div style={{ fontSize:10.5, letterSpacing:0.8, textTransform:'uppercase', color:'var(--muted)', fontWeight:600 }}>{label}</div>
+      <div style={{ display:'flex', alignItems:'baseline', gap:8, marginTop:4 }}>
+        <span style={{ fontFamily: mono?'"JetBrains Mono", monospace':'"Instrument Serif", serif', fontSize: mono?18:24, color:'var(--ink)', fontVariantNumeric:'tabular-nums' }}>{value}</span>
+      </div>
+      {(sub||badge) && <div style={{ marginTop:6 }}>{sub||badge}</div>}
+    </div>
+  );
+}
+function Row({ k, v, mono }) {
+  return (
+    <div style={{ display:'flex', justifyContent:'space-between', padding:'8px 0', borderBottom:'1px dashed var(--border)' }}>
+      <span style={{ color:'var(--muted)' }}>{k}</span>
+      <span style={{ color:'var(--ink)', fontFamily: mono?'"JetBrains Mono", monospace':'inherit', fontSize: mono?12:13 }}>{v}</span>
+    </div>
+  );
+}
+
+// ── 9.4  MODAL GESTIÓN MEDICAMENTOS ─────────────────────────────────
+function GestionMedsModal({ open, onClose, meds, onAdd, onDelete }) {
+  const [tab,        setTab]        = mS('lista');
+  const [confirmDel, setConfirmDel] = mS(null);
+  const [q,          setQ]          = mS('');
+  const today = new Date().toISOString().slice(0,10);
+  const emptyF = { sku:'', nombre:'', presentacion:'', categoria:'', ubicacion:'', stock:'', minimo:'', lote:'', caducidad:'' };
+  const [f, setF] = mS(emptyF);
+  const [errors, setErrors] = mS({});
+  const reset = () => { setF(emptyF); setErrors({}); };
+
+  mE(() => { if (open) { setTab('lista'); setConfirmDel(null); setQ(''); reset(); } }, [open]);
+
+  const skuRepetido = f.sku && meds.some(m => m.sku === f.sku);
+  const fmeds = q ? meds.filter(m => `${m.sku} ${m.nombre} ${m.categoria}`.toLowerCase().includes(q.toLowerCase())) : meds;
+
+  const validate = () => {
+    const e = {};
+    if (!f.sku.trim()) e.sku = 'Clave requerida';
+    else if (!/^[A-Z]{1,4}-\d{3,6}$/.test(f.sku.trim())) e.sku = 'Formato: XX-0000 (ej. MX-0142)';
+    else if (skuRepetido) e.sku = 'Ya existe esa clave';
+    if (!f.nombre.trim() || f.nombre.trim().length < 3) e.nombre = 'Nombre requerido (mín. 3 caracteres)';
+    if (!f.presentacion.trim()) e.presentacion = 'Descripción de presentación requerida';
+    if (f.stock === '' || Number(f.stock) < 0 || !Number.isInteger(Number(f.stock))) e.stock = 'Entero ≥ 0';
+    if (!f.minimo || Number(f.minimo) <= 0 || !Number.isInteger(Number(f.minimo))) e.minimo = 'Entero > 0';
+    if (!f.caducidad) e.caducidad = 'Fecha requerida';
+    else if (f.caducidad < today) e.caducidad = 'La fecha debe ser futura';
+    return e;
+  };
+
+  const handleSave = () => {
+    const e = validate();
+    if (Object.keys(e).length) { setErrors(e); return; }
+    onAdd({
+      sku: f.sku.trim().toUpperCase(), nombre: f.nombre.trim(), presentacion: f.presentacion.trim(),
+      categoria: f.categoria.trim() || 'General', ubicacion: f.ubicacion.trim() || '—',
+      stock: Number(f.stock), minimo: Number(f.minimo),
+      lote: f.lote.trim() || 'L0000', caducidad: f.caducidad
+    });
+    setTab('lista'); reset();
+  };
+
+  return (
+    <Modal open={open} onClose={onClose} title="Gestión de medicamentos" subtitle="Alta y baja del catálogo" width={660}
+      footer={tab==='nuevo'
+        ? <><Btn variant="ghost" onClick={() => setTab('lista')}>Cancelar</Btn><Btn variant="primary" onClick={handleSave}>Guardar medicamento</Btn></>
+        : <Btn variant="ghost" onClick={onClose}>Cerrar</Btn>
+      }>
+      <div style={{ display:'flex', gap:4, borderBottom:'1px solid var(--border)', marginBottom:14, marginTop:-4 }}>
+        {[['lista',`Catálogo (${meds.length})`],['nuevo','+ Nuevo medicamento']].map(([k,l]) =>
+          <button key={k} onClick={() => setTab(k)} style={{ padding:'7px 12px', fontSize:12.5, border:'none', background:'transparent', cursor:'pointer', color: tab===k?'var(--ink)':'var(--muted)', fontWeight: tab===k?500:400, borderBottom: tab===k?'2px solid var(--accent)':'2px solid transparent', marginBottom:-1, fontFamily:'Geist, system-ui' }}>{l}</button>
+        )}
+      </div>
+
+      {tab==='lista' && <>
+        <div style={{ marginBottom:8 }}>
+          <input value={q} onChange={e => setQ(e.target.value)} placeholder="Buscar en el catálogo…"
+            style={{ height:30, padding:'0 10px', background:'var(--surface)', border:'1px solid var(--border)', borderRadius:3, fontSize:12.5, color:'var(--ink)', fontFamily:'Geist, system-ui', outline:'none', width:240 }}/>
+        </div>
+        <div style={{ maxHeight:300, overflowY:'auto', border:'1px solid var(--border)', background:'var(--surface)' }}>
+          <div style={{ display:'grid', gridTemplateColumns:'100px 1fr 90px 60px 32px', padding:'7px 10px', background:'var(--surface-2)', borderBottom:'1px solid var(--border)', fontSize:10.5, letterSpacing:0.6, textTransform:'uppercase', color:'var(--muted)', fontWeight:600, position:'sticky', top:0 }}>
+            <div>Clave</div><div>Medicamento</div><div>Categoría</div><div style={{ textAlign:'right' }}>Stock</div><div/>
+          </div>
+          {fmeds.length === 0
+            ? <div style={{ padding:28, textAlign:'center', color:'var(--muted)', fontSize:13 }}>{meds.length===0?'Sin medicamentos registrados.':'Sin resultados.'}</div>
+            : fmeds.map(m =>
+              <div key={m.sku}>
+                <div style={{ display:'grid', gridTemplateColumns:'100px 1fr 90px 60px 32px', padding:'7px 10px', borderBottom:'1px solid var(--border)', alignItems:'center', fontSize:12 }}>
+                  <span style={{ fontFamily:'"JetBrains Mono", monospace', fontSize:10.5, color:'var(--muted)' }}>{m.sku}</span>
+                  <span style={{ color:'var(--ink)', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{m.nombre}</span>
+                  <span style={{ color:'var(--muted)', fontSize:11 }}>{m.categoria}</span>
+                  <span style={{ textAlign:'right', fontFamily:'"JetBrains Mono", monospace', color:'var(--ink)', fontVariantNumeric:'tabular-nums' }}>{m.stock}</span>
+                  <button onClick={() => setConfirmDel(m.sku===confirmDel?null:m.sku)} title="Eliminar"
+                    style={{ border:'none', background:'transparent', cursor:'pointer', color: m.sku===confirmDel?'var(--crimson)':'var(--muted)', padding:4, display:'flex', justifyContent:'center' }}>
+                    <Icon.basura width="12" height="12"/>
+                  </button>
+                </div>
+                {confirmDel===m.sku &&
+                  <div style={{ padding:'7px 10px', display:'flex', justifyContent:'flex-end', gap:6, alignItems:'center', fontSize:12, background:'#fff8f7', borderBottom:'1px solid var(--border)' }}>
+                    <span style={{ color:'var(--crimson)', marginRight:'auto' }}>¿Eliminar permanentemente?</span>
+                    <Btn variant="ghost" size="sm" onClick={() => setConfirmDel(null)}>Cancelar</Btn>
+                    <Btn variant="danger" size="sm" onClick={() => { onDelete(m.sku); setConfirmDel(null); }}>Sí, eliminar</Btn>
+                  </div>
+                }
+              </div>
+            )
+          }
+        </div>
+      </>}
+
+      {tab==='nuevo' &&
+        <div style={{ display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:12 }}>
+          <Field label="Clave (SKU)" hint="Ej. MX-0142" error={errors.sku}>
+            <Input value={f.sku} onChange={v => { setF({...f,sku:v.toUpperCase()}); setErrors(e=>({...e,sku:null})); }} placeholder="MX-0000" mono error={errors.sku}/>
+          </Field>
+          <Field label="Categoría">
+            <Input value={f.categoria} onChange={v => setF({...f,categoria:v})} placeholder="Analgésico, Antibiótico…"/>
+          </Field>
+          <Field label="Nombre" span={2} error={errors.nombre}>
+            <Input value={f.nombre} onChange={v => { setF({...f,nombre:v}); setErrors(e=>({...e,nombre:null})); }} placeholder="Paracetamol" error={errors.nombre}/>
+          </Field>
+          <Field label="Presentación" span={2} hint="Concentración · forma · cantidad" error={errors.presentacion}>
+            <Input value={f.presentacion} onChange={v => { setF({...f,presentacion:v}); setErrors(e=>({...e,presentacion:null})); }} placeholder="500 mg · Tableta · C/10" error={errors.presentacion}/>
+          </Field>
+          <Field label="Stock inicial" error={errors.stock}>
+            <Input value={f.stock} onChange={v => { setF({...f,stock:v}); setErrors(e=>({...e,stock:null})); }} type="number" min="0" step="1" placeholder="0" mono error={errors.stock}/>
+          </Field>
+          <Field label="Mínimo de seguridad" error={errors.minimo}>
+            <Input value={f.minimo} onChange={v => { setF({...f,minimo:v}); setErrors(e=>({...e,minimo:null})); }} type="number" min="1" step="1" placeholder="100" mono error={errors.minimo}/>
+          </Field>
+          <Field label="Ubicación">
+            <Input value={f.ubicacion} onChange={v => setF({...f,ubicacion:v})} placeholder="A-01-01" mono/>
+          </Field>
+          <Field label="Lote">
+            <Input value={f.lote} onChange={v => setF({...f,lote:v})} placeholder="L0000" mono/>
+          </Field>
+          <Field label="Fecha de caducidad" span={2} error={errors.caducidad}>
+            <Input value={f.caducidad} onChange={v => { setF({...f,caducidad:v}); setErrors(e=>({...e,caducidad:null})); }} type="date" min={today} mono error={errors.caducidad}/>
+          </Field>
+        </div>
+      }
+    </Modal>
+  );
+}
+
+// ── 9.5  MODAL GESTIÓN DE ÁREAS ──────────────────────────────────────
+function GestionAreasModal({ open, onClose, areas, onAdd, onDelete }) {
+  const [nueva,      setNueva]      = mS('');
+  const [confirmDel, setConfirmDel] = mS(null);
+  mE(() => { if (open) { setNueva(''); setConfirmDel(null); } }, [open]);
+  const yaExiste = nueva.trim() && areas.includes(nueva.trim());
+  return (
+    <Modal open={open} onClose={onClose} title="Áreas de destino" subtitle="Servicios del hospital donde se dispensan medicamentos" width={560}
+      footer={<Btn variant="ghost" onClick={onClose}>Cerrar</Btn>}>
+      <div style={{ display:'flex', gap:8, marginBottom:16 }}>
+        <div style={{ flex:1 }}>
+          <Input value={nueva} onChange={setNueva} placeholder="Nombre del área, ej. Quirófano 3"/>
+        </div>
+        <Btn variant="ink" icon={<Icon.mas/>} disabled={!nueva.trim() || !!yaExiste} onClick={() => { onAdd(nueva); setNueva(''); }}>Agregar</Btn>
+      </div>
+      {yaExiste && <div style={{ fontSize:11.5, color:'var(--crimson)', marginTop:-10, marginBottom:10 }}>Esa área ya existe.</div>}
+      <div style={{ border:'1px solid var(--border)', background:'var(--surface)' }}>
+        <div style={{ padding:'8px 12px', background:'var(--surface-2)', borderBottom:'1px solid var(--border)', fontSize:10.5, letterSpacing:0.6, textTransform:'uppercase', color:'var(--muted)', fontWeight:600, display:'flex', justifyContent:'space-between' }}>
+          <span>Áreas registradas</span><span style={{ fontFamily:'"JetBrains Mono", monospace' }}>{areas.length}</span>
+        </div>
+        <div style={{ maxHeight:340, overflowY:'auto' }}>
+          {areas.length===0
+            ? <div style={{ padding:24, textAlign:'center', color:'var(--muted)', fontSize:12.5 }}>Sin áreas registradas. Agrega la primera arriba.</div>
+            : areas.map((a,i) =>
+              <div key={a}>
+                <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'9px 12px', borderTop: i?'1px solid var(--border)':'none', fontSize:13 }}>
+                  <span style={{ color:'var(--ink)', display:'flex', alignItems:'center', gap:8 }}>
+                    <span style={{ width:4, height:4, background:'var(--accent)', borderRadius:2 }}/>{a}
+                  </span>
+                  <button onClick={() => setConfirmDel(a===confirmDel?null:a)} title="Eliminar"
+                    style={{ border:'none', background:'transparent', cursor:'pointer', color: a===confirmDel?'var(--crimson)':'var(--muted)', padding:4 }}>
+                    <Icon.basura width="13" height="13"/>
+                  </button>
+                </div>
+                {confirmDel===a &&
+                  <div style={{ padding:'6px 12px', display:'flex', gap:6, alignItems:'center', fontSize:12, background:'#fff8f7', borderBottom:'1px solid var(--border)' }}>
+                    <span style={{ fontSize:11.5, color:'var(--crimson)', marginRight:'auto' }}>¿Eliminar?</span>
+                    <Btn variant="ghost" size="sm" onClick={() => setConfirmDel(null)}>Cancelar</Btn>
+                    <Btn variant="danger" size="sm" onClick={() => { onDelete(a); setConfirmDel(null); }}>Sí</Btn>
+                  </div>
+                }
+              </div>
+            )
+          }
+        </div>
+      </div>
+    </Modal>
+  );
+}
+  </script>
+
+  <!-- ── MONTAJE DE LA APP ──────────────────────────────────────────────
+       initialScreen: 'panel' | 'almacen' | 'movimientos' | 'reportes'
+  ──────────────────────────────────────────────────────────────────── -->
+  <script type="text/babel">
+    ReactDOM.createRoot(document.getElementById('root')).render(
+      React.createElement(InventarioApp, { initialScreen: 'panel' })
+    );
+  </script>
+
+</body>
+</html>
