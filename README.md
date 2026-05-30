@@ -1,4 +1,4 @@
-# Inventario Farmacéutico — Hospital de la Mujer
+# Inventario Farmacéutico — Hospital/Farmacia/clinica
 
 Sistema de control de inventario para el área de farmacia hospitalaria. Aplicación web de un solo archivo, sin servidor ni base de datos externa: corre directamente en el navegador con almacenamiento local (IndexedDB).
 
