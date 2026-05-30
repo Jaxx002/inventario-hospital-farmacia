@@ -5,8 +5,9 @@ Sistema de control de inventario para el área de farmacia hospitalaria. Aplicac
 ---
 
 ## Capturas de pantalla
+<img width="1364" height="599" alt="Captura de pantalla 2026-05-29 213053" src="https://github.com/user-attachments/assets/f351f710-dd94-4648-b4dd-e64a738a979d" />
+<img width="1365" height="594" alt="image" src="https://github.com/user-attachments/assets/4b2ff0d9-da2b-449c-9e4a-9f3c66b04d65" />
 
-> _Puedes agregar imágenes aquí con `![descripción](ruta-a-imagen.png)` una vez que captures la interfaz._
 
 ---
 
